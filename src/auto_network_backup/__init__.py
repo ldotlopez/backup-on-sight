@@ -20,8 +20,9 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-log = logging.getLogger("hbw")
+log = logging.getLogger(__name__)
 
+APP_NAME = "auto-network-backup"
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 RETRY_AFTER_FAILURE = 300  # shortcut: fixed backoff after a failed run, make it per-job if it ever matters
 INIT_LOCK = threading.Lock()
@@ -73,8 +74,8 @@ def load_config(path: Path) -> dict:
         if missing := {"probe", "source", "every"} - job.keys():
             raise ValueError(f"job {name}: missing {', '.join(sorted(missing))}")
         # the job name is every snapshot's unique tag: it must not split, match all snapshots, or be forged by another job
-        if "," in str(name) or name == "hbw":
-            raise ValueError(f"job {name}: name must not contain commas or be hbw, it becomes a snapshot tag")
+        if "," in str(name) or name == APP_NAME:
+            raise ValueError(f"job {name}: name must not contain commas or be {APP_NAME}, it becomes a snapshot tag")
         tags = job.get("tags", [])
         if not (isinstance(tags, list) and all(isinstance(tag, str) and tag and "," not in tag for tag in tags)):
             raise ValueError(f"job {name}: tags must be a list of non-empty strings without commas")
@@ -165,7 +166,7 @@ def job_endpoint(cfg: dict, name: str) -> str:
 
 
 def job_tags(cfg: dict, name: str) -> list[str]:
-    return list(dict.fromkeys(["hbw", name, *cfg["jobs"][name].get("tags", [])]))
+    return list(dict.fromkeys([APP_NAME, name, *cfg["jobs"][name].get("tags", [])]))
 
 
 def post_json(url: str, payload: dict) -> int:
@@ -293,8 +294,8 @@ def watch(cfg: dict, name: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="hbw")
-    parser.add_argument("-c", "--config", type=Path, default=Path(os.environ.get("HBW_CONFIG", "config.yaml")))
+    parser = argparse.ArgumentParser(prog="anb")
+    parser.add_argument("-c", "--config", type=Path, default=Path(os.environ.get("AUTO_NETWORK_BACKUP_CONFIG", "config.yaml")))
     parser.add_argument("-v", "--verbose", action="store_true", help="log debug details, including rclone's")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daemon", help="watch all jobs")

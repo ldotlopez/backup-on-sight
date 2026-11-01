@@ -4,9 +4,9 @@ restic:
   # shared repo for jobs without their own restic block; each job's name is added as a tag to tell them apart
   repository: /restic            # any restic repo URL works (sftp:, s3:, rest:...); backend creds go in .env
   password: "${RESTIC_PASSWORD}"
-state_dir: "${HBW_STATE_DIR}"    # one mirror + lock + last_ok per job
+state_dir: "${AUTO_NETWORK_BACKUP_STATE_DIR}"    # one mirror + lock + last_ok per job
 poll_interval: 30s               # how often each job checks if a backup is due and probes its host
-# webhook: https://hooks.lan/hbw # optional, gets a JSON POST when a backup starts and ends
+# webhook: https://hooks.lan/backups # optional, gets a JSON POST when a backup starts and ends
 
 jobs:
   # PSP with the FTP server enabled. rclone wants the password obscured: `rclone obscure <pass>`
@@ -14,7 +14,7 @@ jobs:
     probe: {host: 192.168.1.50, port: 21, interval: 10s}   # interval is optional, replaces poll_interval for this job
     source: ":ftp,host=192.168.1.50,user=anonymous,pass=${PSP_FTP_PASS}:/PSP/SAVEDATA"   # adjust to the path your FTP homebrew exposes
     every: 24h
-    tags: [console, saves]       # optional, added to the "hbw" and job name tags on each snapshot
+    tags: [console, saves]       # optional, added to the app and job name tags on each snapshot
     # webhook: https://hooks.lan/psp  # optional, replaces the global webhook for this job; null disables it
 
   # Always-on host over SFTP, backed up weekly, isolated in its own repository

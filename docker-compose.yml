@@ -1,15 +1,15 @@
 services:
-  hbw:
+  auto-network-backup:
     build: .
-    container_name: hbw
+    container_name: auto-network-backup
     restart: unless-stopped
     init: true                   # forwards SIGTERM and reaps rclone/restic children
     network_mode: host           # probes must reach LAN hosts directly
     env_file: ./config/.env
     environment:
-      HBW_STATE_DIR: /state
+      AUTO_NETWORK_BACKUP_STATE_DIR: /state
     volumes:
       - ./config:/config:ro
       - ./data/state:/state
       - ./data/restic:/restic
-# on demand: docker exec hbw hbw run psp
+# on demand: docker exec auto-network-backup anb run psp

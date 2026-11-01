@@ -1,7 +1,7 @@
 [project]
-name = "hbw"
+name = "auto-network-backup"
 version = "0.1.0"
-description = "Add your description here"
+description = "Back up network devices automatically when they show up, with rclone and restic"
 readme = "README.md"
 authors = [
     { name = "Luis López", email = "luis@cuarentaydos.com" }
@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
-hbw = "hbw:main"
+anb = "auto_network_backup:main"
 
 [build-system]
 requires = ["uv_build>=0.11.16,<0.12.0"]

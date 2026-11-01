@@ -6,5 +6,5 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
-ENV HBW_CONFIG=/config/config.yaml
-CMD ["hbw", "daemon"]
+ENV AUTO_NETWORK_BACKUP_CONFIG=/config/config.yaml
+CMD ["anb", "daemon"]
