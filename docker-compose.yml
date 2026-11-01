@@ -3,13 +3,14 @@ services:
     build: .
     container_name: backup-on-sight
     restart: unless-stopped
-    init: true                   # forwards SIGTERM and reaps rclone/restic children
     network_mode: host           # probes must reach LAN hosts directly
     env_file: ./config/.env
     environment:
       BACKUP_ON_SIGHT_STATE_DIR: /state
+      EUID: 1000                 # owner of /state and /restic; set here, not in config/.env
+      EGID: 1000
     volumes:
       - ./config:/config:ro
       - ./data/state:/state
       - ./data/restic:/restic
-# on demand: docker exec backup-on-sight bos run psp
+# on demand, as EUID:EGID: docker exec backup-on-sight docker-entrypoint.sh bos run psp

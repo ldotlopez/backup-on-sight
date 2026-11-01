@@ -42,8 +42,19 @@ cp config/.env.example config/.env      # edit both; rclone passwords come from 
 uv run bos -c config/config.yaml daemon
 ```
 
-A `Dockerfile` and `docker-compose.yml` are included (`docker compose up -d --build`), but they weren't run during
-recent development, so expect to check them.
+A `Dockerfile` and `docker-compose.yml` are included (`docker compose up -d --build`). The image has been run with
+podman, but `docker compose` itself hasn't been tested, so expect to check it.
+
+The container runs backups as the numeric user and group in `EUID` and `EGID`, which need no account in the image.
+`docker-compose.yml` sets both to 1000, and without them the container runs as root. On each start it gives that user
+ownership of anything in `/state` and `/restic` that it doesn't already own, so the first start can be slow with large
+mirrors. It doesn't change `/config`, so make sure that user can read it.
+
+- Set `EUID` and `EGID` in `docker-compose.yml`, not `config/.env`: bash reports an error when `. config/.env` assigns
+  `EUID`, which is read-only there.
+- Run on-demand backups through the entrypoint, so they use the same user:
+  `docker exec backup-on-sight docker-entrypoint.sh bos run psp`. A plain `docker exec` runs as root and can leave
+  root-owned files that block the daemon until the next start.
 
 ## Configuration
 
