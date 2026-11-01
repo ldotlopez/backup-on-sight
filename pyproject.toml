@@ -1,6 +1,6 @@
 [project]
 name = "backup-on-sight"
-version = "0.1.0"
+version = "0.1.1"
 description = "Back up network devices automatically when they show up, with rclone and restic"
 readme = "README.md"
 authors = [
