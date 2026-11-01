@@ -1,5 +1,5 @@
 [project]
-name = "auto-network-backup"
+name = "backup-on-sight"
 version = "0.1.0"
 description = "Back up network devices automatically when they show up, with rclone and restic"
 readme = "README.md"
@@ -7,17 +7,34 @@ authors = [
     { name = "Luis López", email = "luis@cuarentaydos.com" }
 ]
 requires-python = ">=3.13"
+license = "GPL-3.0-or-later"
+keywords = ["backup", "rclone", "restic", "network", "daemon", "ftp"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Archiving :: Backup",
+]
 dependencies = [
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
 ]
 
+[project.urls]
+Homepage = "https://github.com/ldotlopez/backup-on-sight"
+Repository = "https://github.com/ldotlopez/backup-on-sight"
+Issues = "https://github.com/ldotlopez/backup-on-sight/issues"
+
 [project.scripts]
-anb = "auto_network_backup:main"
+bos = "backup_on_sight:main"
 
 [build-system]
-requires = ["uv_build>=0.11.16,<0.12.0"]
-build-backend = "uv_build"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["backup_on_sight.py"]
 
 [dependency-groups]
 dev = [

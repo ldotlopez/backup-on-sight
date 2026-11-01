@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 
 log = logging.getLogger(__name__)
 
-APP_NAME = "auto-network-backup"
+APP_NAME = "backup-on-sight"
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 RETRY_AFTER_FAILURE = 300  # shortcut: fixed backoff after a failed run, make it per-job if it ever matters
 INIT_LOCK = threading.Lock()
@@ -294,8 +294,8 @@ def watch(cfg: dict, name: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="anb")
-    parser.add_argument("-c", "--config", type=Path, default=Path(os.environ.get("AUTO_NETWORK_BACKUP_CONFIG", "config.yaml")))
+    parser = argparse.ArgumentParser(prog="bos")
+    parser.add_argument("-c", "--config", type=Path, default=Path(os.environ.get("BACKUP_ON_SIGHT_CONFIG", "config.yaml")))
     parser.add_argument("-v", "--verbose", action="store_true", help="log debug details, including rclone's")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daemon", help="watch all jobs")

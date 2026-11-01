@@ -1,9 +1,9 @@
-# auto-network-backup
+# backup-on-sight
 
 Back up network devices automatically when they show up.
 
 Some devices are only online now and then: a handheld with its FTP server switched on, a laptop, a NAS that sleeps.
-`auto-network-backup` watches for them. When a device is reachable and its last good backup is older than the
+`backup-on-sight` watches for them. When a device is reachable and its last good backup is older than the
 interval you set, it copies the device with [rclone](https://rclone.org) into a local mirror, then snapshots that
 mirror with [restic](https://restic.net).
 
@@ -35,7 +35,7 @@ continues from it.
 cp config/config.example.yaml config/config.yaml
 cp config/.env.example config/.env      # edit both; rclone passwords come from `rclone obscure <password>`
 
-uv run anb -c config/config.yaml daemon
+uv run bos -c config/config.yaml daemon
 ```
 
 A `Dockerfile` and `docker-compose.yml` are included (`docker compose up -d --build`), but they weren't run during
@@ -47,7 +47,7 @@ recent development, so expect to check them.
 restic:                            # shared repository, for jobs without their own
   repository: "${RESTIC_REPOSITORY}"
   password: "${RESTIC_PASSWORD}"
-state_dir: "${AUTO_NETWORK_BACKUP_STATE_DIR}"   # one mirror, lock and last_ok per job
+state_dir: "${BACKUP_ON_SIGHT_STATE_DIR}"   # one mirror, lock and last_ok per job
 poll_interval: 30s                 # optional, default 30s
 webhook: https://hooks.lan/backups # optional
 
@@ -82,22 +82,22 @@ A tag is only a label, though. Anyone with a shared repository's password can re
 Give a job its own `restic` block when it needs real separation. You can mix both, and the top-level block is optional
 if every job has its own.
 
-Each snapshot is tagged `auto-network-backup`, the job name and any custom `tags`. Restic's host is the `host=` value
+Each snapshot is tagged `backup-on-sight`, the job name and any custom `tags`. Restic's host is the `host=` value
 from the rclone source, or the job name if there isn't one, so if a device's address changes, its snapshots
 appear under a new host.
 
 ## Commands
 
 ```sh
-anb [-c CONFIG] [-v] daemon              # watch all jobs
-anb [-c CONFIG] [-v] run JOB             # back up now, unless the last backup is too recent
-anb [-c CONFIG] [-v] run --force JOB     # back up now regardless
+bos [-c CONFIG] [-v] daemon              # watch all jobs
+bos [-c CONFIG] [-v] run JOB             # back up now, unless the last backup is too recent
+bos [-c CONFIG] [-v] run --force JOB     # back up now regardless
 ```
 
 `run` ignores the probe and won't start if that job is already running. It exits with status 1 if the backup fails
 or the job is already running, and 0 otherwise, **including when it skips a recent backup**.
 
-The config defaults to `config.yaml`, or `$AUTO_NETWORK_BACKUP_CONFIG` if set. `-v` adds debug detail: the next due
+The config defaults to `config.yaml`, or `$BACKUP_ON_SIGHT_CONFIG` if set. `-v` adds debug detail: the next due
 time, exit codes and timings, webhook payloads and responses, and rclone's `-v` output.
 
 ## Webhooks
@@ -105,10 +105,10 @@ time, exit codes and timings, webhook payloads and responses, and rclone's `-v` 
 The webhook URL gets a JSON `POST` when a backup starts and ends:
 
 ```json
-{"job": "psp", "phase": "start", "host": "192.168.1.50", "tags": ["auto-network-backup", "psp"], "timestamp": "2026-11-01T12:00:00+00:00"}
+{"job": "psp", "phase": "start", "host": "192.168.1.50", "tags": ["backup-on-sight", "psp"], "timestamp": "2026-11-01T12:00:00+00:00"}
 ```
 ```json
-{"job": "psp", "phase": "end", "host": "192.168.1.50", "tags": ["auto-network-backup", "psp"], "timestamp": "2026-11-01T12:05:00+00:00",
+{"job": "psp", "phase": "end", "host": "192.168.1.50", "tags": ["backup-on-sight", "psp"], "timestamp": "2026-11-01T12:05:00+00:00",
  "success": false, "error": "sync failed, no snapshot taken", "duration_seconds": 300.0}
 ```
 
@@ -158,4 +158,4 @@ uv run ruff check .
 
 ## License
 
-No license has been chosen yet, so normal copyright applies by default.
+[GPL-3.0-or-later](LICENSE)
