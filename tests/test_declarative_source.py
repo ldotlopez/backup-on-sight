@@ -1,4 +1,4 @@
-"""Declarative sources, which load_config turns into rclone connection strings."""
+"""Declarative sources: FTP goes through lftp, every other backend through an rclone connection string."""
 
 import shutil
 import socket
@@ -10,6 +10,7 @@ import pytest
 import backup_on_sight as bos
 
 needs_rclone = pytest.mark.skipif(not shutil.which("rclone"), reason="needs rclone")
+needs_lftp = pytest.mark.skipif(not shutil.which("lftp"), reason="needs lftp")
 
 
 def load_job(tmp_path, job: str) -> dict:
@@ -19,51 +20,173 @@ def load_job(tmp_path, job: str) -> dict:
 
 
 def reveal(obscured: str) -> str:
-    return subprocess.run(["rclone", "reveal", obscured], capture_output=True, text=True, check=True).stdout.strip()
+    return subprocess.run(["rclone", "reveal", "--", obscured], capture_output=True, text=True, check=True).stdout.strip()
 
 
-@needs_rclone
-def test_ftp_defaults_to_anonymous_login_folder_and_derives_the_probe(tmp_path):
+class FakeFtp:
+    """Just enough FTP for lftp: one flat folder, a bare LIST refused like on the PSP, and RETR failing for missing files."""
+
+    def __init__(self, listing: dict[str, bytes | None]) -> None:
+        self.listing = listing
+        self.commands: list[str] = []
+        self.listener = socket.create_server(("127.0.0.1", 0))
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def serve(self) -> None:
+        while True:
+            conn, _ = self.listener.accept()
+            threading.Thread(target=self.session, args=(conn,), daemon=True).start()
+
+    def session(self, conn: socket.socket) -> None:
+        data_listener = None
+        with conn, conn.makefile("rwb") as stream:
+
+            def reply(*lines: str) -> None:
+                stream.write("".join(f"{line}\r\n" for line in lines).encode())
+                stream.flush()
+
+            def send_data(payload: bytes) -> None:
+                reply("150 here")
+                data, _ = data_listener.accept()
+                with data:
+                    data.sendall(payload)
+                reply("226 done")
+
+            reply("220 ready")
+            for raw in stream:
+                command = raw.decode().rstrip("\r\n")
+                self.commands.append(command)
+                verb, _, argument = command.partition(" ")
+                if verb == "USER":
+                    reply("331 go on")
+                elif verb == "PASS":
+                    reply("230 in")
+                elif verb == "FEAT":
+                    reply("211-", " UTF8", "211 End")
+                elif verb == "PWD":
+                    reply('257 "/"')
+                elif verb in ("CWD", "TYPE", "OPTS"):
+                    reply("250 ok")
+                elif verb == "PASV":
+                    data_listener = socket.create_server(("127.0.0.1", 0))
+                    port = data_listener.getsockname()[1]
+                    reply(f"227 127,0,0,1,{port >> 8},{port & 255}")  # no parentheses, like the Switch
+                elif verb == "LIST" and argument:
+                    # a missing body still gets a size: lftp creates empty files without asking for them
+                    rows = (f"-rw-r--r-- 1 o g {len(body or b'x')} Jan  1  2020 {name}\r\n" for name, body in self.listing.items())
+                    send_data("".join(rows).encode())
+                elif verb == "LIST":
+                    reply("550 Invalid directory.")
+                elif verb == "RETR" and self.listing.get(argument.rsplit("/", 1)[-1]) is not None:
+                    send_data(self.listing[argument.rsplit("/", 1)[-1]])
+                elif verb == "QUIT":
+                    reply("221 bye")
+                    return
+                else:
+                    reply("550 no")
+
+
+def run_lftp(source: dict, mirror, **env: str) -> subprocess.CompletedProcess:
+    command, script = bos.sync_plan(source, mirror, False)
+    return subprocess.run(command, input=script, capture_output=True, text=True, timeout=30, env=env or None)
+
+
+def test_ftp_stays_as_settings_with_a_derived_probe(tmp_path):
     job = load_job(tmp_path, "{source: {type: ftp, host: switch.lan, port: 5000}, every: 1h}")
+    cfg = {"jobs": {"t": job}}
 
     assert job["probe"] == {"host": "switch.lan", "port": 5000}
-    assert bos.source_host(job["source"]) == "switch.lan"
-    assert bos.source_param(job["source"], "port") == "5000"
-    assert bos.source_param(job["source"], "user") == "anonymous"
-    assert reveal(bos.source_param(job["source"], "pass")) == "anonymous"
-    assert job["source"].endswith(":")  # the login folder, not /: the Switch answers only for that one
+    assert bos.job_host(cfg, "t") == "switch.lan"
+    assert bos.job_endpoint(cfg, "t") == "switch.lan:5000"
 
 
-@needs_rclone
-def test_ftp_stays_gentle_by_default_and_options_can_override_it(tmp_path):
-    gentle = load_job(tmp_path, "{source: {type: ftp, host: h}, every: 1h}")["source"]
-    assert ',concurrency="1",disable_epsv="true",disable_mlsd="true"' in gentle
-
-    tuned = load_job(tmp_path, "{source: {type: ftp, host: h, options: {concurrency: 2}}, every: 1h}")["source"]
-    assert bos.source_param(tuned, "concurrency") == "2"
-    assert tuned.count("concurrency=") == 1
+def test_ftp_default_port_and_probe_overrides(tmp_path):
+    assert load_job(tmp_path, "{source: {type: ftp, host: h}, every: 1h}")["probe"] == {"host": "h", "port": 21}
+    job = load_job(tmp_path, "{source: {type: ftp, host: h}, probe: {port: 80, interval: 10s}, every: 1h}")
+    assert job["probe"] == {"host": "h", "port": 80, "interval": "10s"}
 
 
-@needs_rclone
-def test_path_with_a_share_like_the_psp_and_default_port(tmp_path):
-    job = load_job(tmp_path, "{source: {type: ftp, host: psp.lan, path: /ms0:/PSP/SAVEDATA}, every: 1h}")
+def test_lftp_script_defaults_to_root_and_options_override_settings(tmp_path):
+    script = bos.lftp_script({"host": "h", "options": {"net:connection-limit": 2}}, tmp_path)
 
-    assert job["probe"] == {"host": "psp.lan", "port": 21}
-    assert job["source"].endswith(":/ms0:/PSP/SAVEDATA")
-    assert bos.job_endpoint({"jobs": {"t": job}}, "t") == "psp.lan"
+    assert f'mirror --delete --no-perms "/" "{tmp_path}"' in script
+    assert 'set net:connection-limit "2"' in script
+    assert 'set net:connection-limit "1"' not in script
+    assert 'set ftp:ssl-allow "false"' in script
+
+
+def test_password_goes_through_stdin_not_the_command_line(tmp_path):
+    command, script = bos.sync_plan({"host": "h", "password": "s3cret"}, tmp_path, False)
+    assert "s3cret" not in " ".join(command)
+    assert "s3cret" in script
+
+
+@needs_lftp
+def test_mirror_copies_lists_with_an_argument_and_deletes_extras(tmp_path):
+    server = FakeFtp({"save.bin": b"hello"})
+    mirror = tmp_path / "mirror"
+    mirror.mkdir()
+    (mirror / "gone.bin").write_text("old")
+
+    result = run_lftp({"host": "127.0.0.1", "port": server.port}, mirror)
+
+    assert result.returncode == 0, result.stderr
+    assert sorted(path.name for path in mirror.iterdir()) == ["save.bin"]
+    assert (mirror / "save.bin").read_bytes() == b"hello"
+    assert "LIST ." in server.commands
+
+
+@needs_lftp
+def test_one_unreadable_file_fails_the_sync(tmp_path):
+    server = FakeFtp({"save.bin": b"hello", "broken.bin": None})
+    assert run_lftp({"host": "127.0.0.1", "port": server.port}, tmp_path / "mirror").returncode != 0
+
+
+@needs_lftp
+def test_refused_folder_fails_the_sync(tmp_path):
+    server = FakeFtp({})
+    source = {"host": "127.0.0.1", "port": server.port, "options": {"ftp:list-options": ""}}
+    assert run_lftp(source, tmp_path / "mirror").returncode != 0
+
+
+@needs_lftp
+def test_non_ascii_names_survive_a_c_locale(tmp_path):
+    server = FakeFtp({"mañana.bin": b"hello"})
+    mirror = tmp_path / "mirror"
+
+    result = run_lftp({"host": "127.0.0.1", "port": server.port}, mirror, LC_ALL="C", PATH=bos.os.environ["PATH"])
+
+    assert result.returncode == 0, result.stderr
+    assert (mirror / "mañana.bin").read_bytes() == b"hello"
+
+
+@needs_lftp
+def test_awkward_login_reaches_the_server_exactly(tmp_path):
+    server = FakeFtp({"save.bin": b"hello"})
+    user, password = 'me,"x', 'pa"ss w\\or,d:$x#;'
+
+    run_lftp({"host": "127.0.0.1", "port": server.port, "user": user, "password": password}, tmp_path / "mirror")
+
+    assert f"USER {user}" in server.commands
+    assert f"PASS {password}" in server.commands
 
 
 def test_other_backends_and_options_pass_through(tmp_path):
-    job = load_job(tmp_path, '{source: {type: sftp, host: nas.lan, user: me, path: /srv, options: {key_file: /k, use_insecure_cipher: true}}, every: 1h}')
+    job = load_job(tmp_path, "{source: {type: sftp, host: nas.lan, user: me, path: /srv, options: {key_file: /k, use_insecure_cipher: true}}, every: 1h}")
 
     assert job["source"] == ':sftp,host="nas.lan",user="me",key_file="/k",use_insecure_cipher="true":/srv'
     assert job["probe"] == {"host": "nas.lan", "port": 22}
 
 
+def test_other_backends_default_to_root(tmp_path):
+    assert load_job(tmp_path, "{source: {type: sftp, host: h}, every: 1h}")["source"].endswith(":/")
+
+
 @needs_rclone
-def test_probe_settings_override_the_source(tmp_path):
-    job = load_job(tmp_path, "{source: {type: ftp, host: h}, probe: {port: 80, interval: 10s}, every: 1h}")
-    assert job["probe"] == {"host": "h", "port": 80, "interval": "10s"}
+def test_rclone_password_is_obscured(tmp_path):
+    source = load_job(tmp_path, "{source: {type: sftp, host: h, password: 'pa ss'}, every: 1h}")["source"]
+    assert reveal(bos.source_param(source, "pass")) == "pa ss"
 
 
 def test_rclone_string_source_is_untouched_and_still_needs_a_probe(tmp_path):
@@ -80,37 +203,12 @@ def test_rclone_string_source_is_untouched_and_still_needs_a_probe(tmp_path):
     ("{type: sftp, host: h, options: nope}", "source options must map"),
     ("{type: sftp, host: h, options: {'a,b': 1}}", "source options must map"),
     ("{type: webdav}", "can't provide a probe"),
+    ("{type: ftp}", "ftp source needs a host"),
+    ("{type: ftp, host: h, options: nope}", "source options must map"),
+    ("{type: ftp, host: h, options: {'a;b': 1}}", "source options must map"),
+    ('{type: ftp, host: h, path: "/a\\nb"}', "line breaks"),
+    ('{type: ftp, host: h, options: {"ftp:x": "a\\nb"}}', "line breaks"),
 ])
 def test_rejects_bad_sources(tmp_path, source, message):
     with pytest.raises(ValueError, match=message):
         load_job(tmp_path, f"{{source: {source}, every: 1h}}")
-
-
-@needs_rclone
-def test_awkward_login_reaches_the_server_exactly(tmp_path):
-    """Real rclone against a server that records the login and rejects it."""
-    logins: list[str] = []
-
-    def serve(listener: socket.socket) -> None:
-        conn, _ = listener.accept()
-        with conn, conn.makefile("rwb") as stream:
-            stream.write(b"220 ready\r\n")
-            stream.flush()
-            for raw in stream:
-                command, _, argument = raw.decode().rstrip("\r\n").partition(" ")
-                logins.append(argument) if command in ("USER", "PASS") else None
-                stream.write(b"331 go on\r\n" if command == "USER" else b"530 no\r\n")
-                stream.flush()
-                if command == "PASS":
-                    return
-
-    with socket.create_server(("127.0.0.1", 0)) as listener:
-        threading.Thread(target=serve, args=(listener,), daemon=True).start()
-        source = bos.rclone_source("t", {
-            "type": "ftp", "host": "127.0.0.1", "port": listener.getsockname()[1],
-            "user": 'me,"x', "password": 'pa"ss w\\or,d:$x',
-        })
-        result = subprocess.run(["rclone", "lsf", "--retries", "1", "--low-level-retries", "1", source], capture_output=True, text=True)
-
-    assert result.returncode != 0
-    assert logins == ['me,"x', 'pa"ss w\\or,d:$x']

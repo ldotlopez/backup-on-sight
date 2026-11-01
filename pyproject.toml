@@ -1,14 +1,14 @@
 [project]
 name = "backup-on-sight"
 version = "0.1.2"
-description = "Back up network devices automatically when they show up, with rclone and restic"
+description = "Back up network devices automatically when they show up, with lftp, rclone and restic"
 readme = "README.md"
 authors = [
     { name = "Luis López", email = "luis@cuarentaydos.com" }
 ]
 requires-python = ">=3.13"
 license = "GPL-3.0-or-later"
-keywords = ["backup", "rclone", "restic", "network", "daemon", "ftp"]
+keywords = ["backup", "lftp", "rclone", "restic", "network", "daemon", "ftp"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",

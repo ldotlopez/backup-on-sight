@@ -1,4 +1,4 @@
-"""Event-driven backups: when a host shows up, rclone-sync it to a mirror and snapshot the mirror with restic."""
+"""Event-driven backups: when a host shows up, copy it to a mirror (lftp for FTP, rclone otherwise) and snapshot the mirror with restic."""
 
 import argparse
 import fcntl
@@ -28,8 +28,16 @@ RETRY_AFTER_FAILURE = 300  # shortcut: fixed backoff after a failed run, make it
 INIT_LOCK = threading.Lock()
 WEBHOOK_TIMEOUT = 10
 DEFAULT_PORTS = {"ftp": 21, "sftp": 22}  # lets these types skip the probe; any other type needs a port or a probe
-# console FTP servers are fragile: the PSP's works with these and went down when probed without them, cause unproven
-FTP_DEFAULT_OPTIONS = {"concurrency": 1, "disable_epsv": True, "disable_mlsd": True}
+FTP_DEFAULT_OPTIONS = {
+    "cmd:fail-exit": True,  # stop at the first failure, like a mistyped setting, instead of mirroring anyway
+    "file:charset": "UTF-8",  # the container's C locale would mangle non-ASCII filenames
+    "ftp:list-options": ".",  # the PSP answers a bare LIST with 550 but accepts LIST .
+    "ftp:ssl-allow": False,  # console servers don't speak TLS
+    "ftp:use-feat": False,  # gentlest handshake: the PSP refuses what FEAT leads to, and the Switch works without it
+    "net:connection-limit": 1,  # console FTP servers are fragile
+    "net:max-retries": 1,  # a failed run is retried by the watcher
+    "net:timeout": 60,
+}
 
 
 def expand(value):
@@ -74,30 +82,67 @@ def rclone_quote(value: object) -> str:
     return '"' + text.replace('"', '""') + '"'
 
 
-def rclone_source(name: str, source: dict) -> str:
-    """Turn a declarative source into an rclone connection string."""
+def check_source(name: str, source: dict) -> None:
     backend = source.get("type")
     if not (isinstance(backend, str) and re.fullmatch(r"[a-z0-9]+", backend)):
-        raise ValueError(f"job {name}: source needs a type, an rclone backend like ftp or sftp")
+        raise ValueError(f"job {name}: source needs a type, like ftp or sftp")
     # a typo like "passwd" would otherwise silently log in with the defaults
     if unknown := source.keys() - {"type", "host", "port", "path", "user", "password", "options"}:
         raise ValueError(f"job {name}: unknown source settings: {', '.join(sorted(unknown))}")
+
+
+def rclone_source(name: str, source: dict) -> str:
+    """Turn a declarative source into an rclone connection string."""
+    backend = source["type"]
     options = source.get("options") or {}
     if not (isinstance(options, dict) and all(re.fullmatch(r"[a-z0-9_]+", str(key)) for key in options)):
         raise ValueError(f"job {name}: source options must map rclone option names to values")
 
     params = {key: source[key] for key in ("host", "port", "user") if source.get(key) is not None}
-    password = source.get("password")
-    if backend == "ftp":  # rclone's FTP refuses an empty password, even to log in as anonymous
-        params.setdefault("user", "anonymous")
-        password = "anonymous" if password is None else password
-        params |= FTP_DEFAULT_OPTIONS
-    if password is not None:
-        params["pass"] = rclone_obscure(password)
+    if source.get("password") is not None:
+        params["pass"] = rclone_obscure(source["password"])
     params |= options
     joined = "".join(f",{key}={rclone_quote(value)}" for key, value in params.items())
-    # no default path: some servers only answer for their login folder, not for an explicit /
-    return f":{backend}{joined}:{source.get('path') or ''}"
+    return f":{backend}{joined}:{source.get('path') or '/'}"
+
+
+def check_ftp_source(name: str, source: dict) -> None:
+    if not source.get("host"):
+        raise ValueError(f"job {name}: ftp source needs a host")
+    options = source.get("options") or {}
+    if not (isinstance(options, dict) and all(re.fullmatch(r"[a-z0-9:_-]+", str(key)) for key in options)):
+        raise ValueError(f"job {name}: source options must map lftp setting names to values")
+    # these become lines of an lftp script, where a line break would start a new command
+    if any(re.search(r"[\r\n]", str(value)) for value in [*source.values(), *options.values()]):
+        raise ValueError(f"job {name}: source settings must not contain line breaks")
+
+
+def lftp_quote(value: object) -> str:
+    text = str(value).lower() if isinstance(value, bool) else str(value)  # lftp wants true, YAML's str gives True
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def lftp_script(source: dict, mirror: Path, verbose: bool = False) -> str:
+    """The lftp commands that make the mirror match an FTP source."""
+    settings = FTP_DEFAULT_OPTIONS | (source.get("options") or {})
+    port, user = source.get("port", DEFAULT_PORTS["ftp"]), source.get("user", "anonymous")
+    password = source.get("password", "anonymous")
+    return "\n".join([
+        *(f"set {key} {lftp_quote(value)}" for key, value in settings.items()),
+        f"open -p {lftp_quote(port)} {lftp_quote(source['host'])}",
+        f"user {lftp_quote(user)} {lftp_quote(password)}",
+        f"mirror --delete --no-perms {'-v ' if verbose else ''}{lftp_quote(source.get('path') or '/')} {lftp_quote(mirror)}",
+        "",
+    ])
+
+
+def sync_plan(source: str | dict, mirror: Path, verbose: bool) -> tuple[list[str], str | None]:
+    """The command that syncs a source into the mirror and what to feed it: FTP goes through lftp, the rest through rclone."""
+    if isinstance(source, dict):
+        # through stdin, so the password stays out of the process list
+        return ["lftp"], lftp_script(source, mirror, verbose)
+    command = ["rclone", "sync", source, str(mirror), "--contimeout", "15s", "--timeout", "60s", "--retries", "1"]
+    return [*command, "-v"] if verbose else command, None
 
 
 def declared_probe(name: str, source: dict, probe: dict | None) -> dict:
@@ -124,7 +169,11 @@ def load_config(path: Path) -> dict:
             raise ValueError(f"job {name}: webhook must be an http(s) URL")
         if isinstance(job.get("source"), dict):
             declared = job["source"]
-            job["source"] = rclone_source(name, declared)
+            check_source(name, declared)
+            if declared["type"] == "ftp":
+                check_ftp_source(name, declared)  # stays as settings: lftp has no connection strings
+            else:
+                job["source"] = rclone_source(name, declared)
             job["probe"] = declared_probe(name, declared, job.get("probe"))
         if missing := {"probe", "source", "every"} - job.keys():
             raise ValueError(f"job {name}: missing {', '.join(sorted(missing))}")
@@ -210,13 +259,17 @@ def last_ok(cfg: dict, name: str) -> float:
 
 
 def job_host(cfg: dict, name: str) -> str:
+    source = cfg["jobs"][name]["source"]
+    if isinstance(source, dict):
+        return source["host"]
     # sources without host= (local paths, named remotes) fall back to the job name
-    return source_host(cfg["jobs"][name]["source"]) or name
+    return source_host(source) or name
 
 
 def job_endpoint(cfg: dict, name: str) -> str:
     """Where a job syncs from, safe to log: host, plus the port if the source sets one."""
-    port = source_param(cfg["jobs"][name]["source"], "port")
+    source = cfg["jobs"][name]["source"]
+    port = source.get("port") if isinstance(source, dict) else source_param(source, "port")
     return f"{job_host(cfg, name)}:{port}" if port else job_host(cfg, name)
 
 
@@ -259,19 +312,19 @@ def back_up(cfg: dict, name: str, d: Path) -> str | None:
         return "restic repository unavailable, nothing synced"
 
     job, mirror = cfg["jobs"][name], d / "mirror"
-    # not the source itself: rclone connection strings embed credentials
+    # not the source itself: it holds credentials
     log.info("%s: syncing from %s", name, job_endpoint(cfg, name))
     # sync deletes extraneous files only after a complete pass; an interrupted run leaves the mirror
     # half-updated but never snapshotted, and the next run resumes from it
-    sync = ["rclone", "sync", job["source"], str(mirror), "--contimeout", "15s", "--timeout", "60s", "--retries", "1"]
+    source = job["source"]
+    command, script = sync_plan(source, mirror, log.isEnabledFor(logging.DEBUG))
     # rclone prints the connection string in its errors, so hide it; errors="replace" because device filenames may not be UTF-8
     # shortcut: its errors appear when the sync ends, not live; stream them line by line if that hurts on long syncs
-    if log.isEnabledFor(logging.DEBUG):
-        sync.append("-v")
     started = time.monotonic()
-    result = subprocess.run(sync, stderr=subprocess.PIPE, errors="replace")
-    sys.stderr.write(result.stderr.replace(job["source"], job_endpoint(cfg, name)))
-    log.debug("%s: rclone exited with %d after %.1fs", name, result.returncode, time.monotonic() - started)
+    result = subprocess.run(command, input=script, stderr=subprocess.PIPE, errors="replace")
+    secret = source.get("password") if isinstance(source, dict) else source
+    sys.stderr.write(result.stderr.replace(secret, job_endpoint(cfg, name)) if secret else result.stderr)
+    log.debug("%s: %s exited with %d after %.1fs", name, command[0], result.returncode, time.monotonic() - started)
     if result.returncode != 0:
         return "sync failed, no snapshot taken"
     # a source that looks empty is more likely a broken device or path than a real state worth recording
@@ -351,7 +404,7 @@ def watch(cfg: dict, name: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bos")
     parser.add_argument("-c", "--config", type=Path, default=Path(os.environ.get("BACKUP_ON_SIGHT_CONFIG_FILE", "config/config.yaml")))
-    parser.add_argument("-v", "--verbose", action="store_true", help="log debug details, including rclone's")
+    parser.add_argument("-v", "--verbose", action="store_true", help="log debug details, including the sync tool's")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daemon", help="watch all jobs")
     run = sub.add_parser("run", help="back up a job now if it is due, ignoring the probe")

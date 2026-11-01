@@ -8,19 +8,19 @@ Back up network devices automatically when they show up.
 
 Some devices are only online now and then: a handheld with its FTP server switched on, a laptop, a NAS that sleeps.
 `backup-on-sight` watches for them. When a device is reachable and its last good backup is older than the
-interval you set, it copies the device with [rclone](https://rclone.org) into a local mirror, then snapshots that
-mirror with [restic](https://restic.net).
+interval you set, it copies the device into a local mirror, with [lftp](https://lftp.yar.ru) for FTP and
+[rclone](https://rclone.org) for everything else, then snapshots that mirror with [restic](https://restic.net).
 
 > [!IMPORTANT]
 > **This project was developed with AI assistance.** Most of the code, tests and documentation, including this
 > README, were written by Claude Code (Anthropic) under the direction of the maintainer. It has not had an independent
-> audit. So far it has only run against one real target, a PSP over FTP, and the tests don't exercise restoring.
+> audit. So far it has only run against a PSP and a Switch over FTP, and the tests don't exercise restoring.
 > Before you depend on it, read the code and **test a restore of your own data**.
 
 ## How it works
 
 1. Each job has a watcher that checks whether a backup is due, and if so, tries a TCP connection to the job's probe.
-2. If the probe answers, `rclone sync` updates the job's mirror from the source.
+2. If the probe answers, `lftp mirror` or `rclone sync` updates the job's mirror from the source.
 3. If the sync succeeds and the mirror holds files, `restic backup` takes a snapshot of the mirror.
 4. If anything fails, no snapshot is taken and the job retries after 5 minutes.
 
@@ -31,7 +31,7 @@ continues from it.
 ## Requirements
 
 - Python 3.13 and [uv](https://docs.astral.sh/uv/)
-- `rclone` and `restic` on your `PATH`
+- `restic` on your `PATH`, plus `lftp` for FTP sources and `rclone` for all others
 
 ## Quick start
 
@@ -71,7 +71,7 @@ webhook: https://hooks.lan/backups # optional
 
 jobs:
   psp:
-    source: {type: ftp, host: 192.168.1.50, path: "/ms0:/"}
+    source: {type: ftp, host: 192.168.1.50, port: 1337, path: "/ms0:/"}
     probe: {interval: 10s}
     every: 24h
     tags: [console, saves]
@@ -89,17 +89,19 @@ jobs:
 
 | Source setting | Required | Meaning |
 |---|---|---|
-| `type` | Yes | An [rclone backend](https://rclone.org/overview/), like `ftp` or `sftp` |
+| `type` | Yes | `ftp`, which uses lftp, or any other [rclone backend](https://rclone.org/overview/), like `sftp` |
 | `host`, `port` | Depends on the backend | The device's address. `ftp` defaults to port 21 and `sftp` to 22 |
-| `path` | No | The folder to back up. By default, the folder the server logs you into |
-| `user`, `password` | Depends on the backend | Write the plain password, it's obscured for you. `ftp` defaults to `anonymous` |
-| `options` | No | Any other rclone backend options, like `{key_file: /keys/nas}` |
+| `path` | No | The folder to back up. Defaults to `/` |
+| `user`, `password` | Depends on the backend | Write the plain password. `ftp` defaults to `anonymous` |
+| `options` | No | For `ftp`, [lftp settings](https://lftp.yar.ru/lftp-man.html) like `{"net:connection-limit": 2}`. For others, rclone backend options like `{key_file: /keys/nas}` |
 
-`type: ftp` defaults to `concurrency: 1`, `disable_epsv: true` and `disable_mlsd: true`, because the FTP servers on
-consoles are fragile. Raise them through `options` for a server that can take it.
+`type: ftp` is set up for the fragile FTP servers on consoles: one connection, no TLS, no `FEAT`, and listings sent as
+`LIST .`. Change that through `options` for a server that can take more, or that needs TLS.
 
-Paths depend on the device. A PSP needs its root share, `/ms0:/`. Leaving out `path` isn't the same as `path: /`, as
-some servers only answer for one of them.
+A PSP needs `path: /ms0:/`, because `/` answers `LIST .` with an error and the job fails.
+
+For anything else rclone can do, `source` can be a string holding any rclone source. That includes FTP, though rclone
+fails on the Switch's servers.
 
 Strings accept `${VAR}`, resolved from the environment or from a `.env` next to the config file (the environment
 wins). A missing variable stops startup. Write a literal `$` as `$$`, and quote values inside `{...}`, such as URLs
@@ -132,7 +134,7 @@ The config comes from `-c`, then `$BACKUP_ON_SIGHT_CONFIG_FILE`, then `./config/
 from `state_dir` in the config, then `$BACKUP_ON_SIGHT_STATE_DIR`, then `./state`. Relative paths follow the directory
 you start `bos` from, and the log shows the full paths at startup. Starting from another directory with a relative state
 directory means a new mirror and a separate lock, so a second copy could run at once. Use an absolute path for services. `-v` adds debug detail: the next due
-time, exit codes and timings, webhook payloads and responses, and rclone's `-v` output.
+time, exit codes and timings, webhook payloads and responses, and the sync tool's `-v` output.
 
 ## Webhooks
 
@@ -162,24 +164,24 @@ restic restore latest --tag psp --target ./restored
 
 ## Behaviour to know about
 
-- **Deletions follow the source.** Like `rsync --delete`, `rclone sync` removes mirror files that are gone from the
-  source once a pass finishes without errors. Older snapshots keep them.
+- **Deletions follow the source.** Like `rsync --delete`, the sync removes mirror files that are gone from the
+  source. Older snapshots keep them.
 - **A source with no files fails the run,** because that more likely means a broken device or path. By then a
   previously full mirror may already be emptied, so it's copied again once the files return. A source that only
   loses *most* of its files is still snapshotted as a success.
-- **One unreadable file blocks the job.** Any rclone error means no snapshot, and there's no way to exclude files yet.
-- **rclone can't back up some FTP servers.** The Switch's answers a listing with a path as an empty folder, and only
-  lists a folder after changing into it, which rclone doesn't do. The sync fails with `dirExists: object not found`.
+- **One unreadable file blocks the job.** Any sync error means no snapshot, and there's no way to exclude files yet.
 - **Retention isn't handled.** `restic forget` and `prune` are never run, so snapshots accumulate until you run them.
-- **rclone's output is delayed.** Its messages appear when the sync ends, not as it runs.
+- **Sync errors are delayed.** They appear when the sync ends, not as it runs.
 - **Failing backends are slow to report.** restic retries for several minutes before giving up.
 
 ## Security
 
-- Sources and repository URLs are kept out of the logs and webhook payloads, because they hold credentials. rclone's
-  error output is filtered for the exact source string, which has only been tested on connection failures.
-- While a sync runs, the rclone source, including its obscured password, is visible to local users in the process
-  list. rclone's obscuring is reversible, so it isn't encryption.
+- Sources and repository URLs are kept out of the logs and webhook payloads, because they hold credentials. The sync
+  tool's error output is filtered for the password or rclone source string, which has only been tested on connection
+  failures.
+- lftp gets its password through stdin. While an rclone sync runs, its source, including the obscured password, is
+  visible to local users in the process list. rclone's obscuring is reversible, so it isn't encryption.
+- FTP sends passwords unencrypted, and `type: ftp` doesn't try TLS unless you turn on `ftp:ssl-allow`.
 - The `.env` file and `config/config.yaml` are gitignored. Keep secrets there.
 - Use `https://` for REST repositories, since `http://` sends the login unencrypted.
 - All credentials live on the machine running this tool, so isolated repositories don't protect you if that machine
@@ -188,7 +190,7 @@ restic restore latest --tag psp --target ./restored
 ## Development
 
 ```sh
-uv run pytest      # some tests need rclone and restic on PATH, and skip without them
+uv run pytest      # some tests need lftp, rclone and restic on PATH, and skip without them
 uv run ruff check .
 ```
 
