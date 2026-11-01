@@ -1,5 +1,9 @@
 # backup-on-sight
 
+[![Latest release](https://img.shields.io/github/v/release/ldotlopez/backup-on-sight)](https://github.com/ldotlopez/backup-on-sight/releases/latest)
+[![Build and release status](https://github.com/ldotlopez/backup-on-sight/actions/workflows/release.yml/badge.svg)](https://github.com/ldotlopez/backup-on-sight/actions/workflows/release.yml)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-zepolson-FFDD00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/zepolson)
+
 Back up network devices automatically when they show up.
 
 Some devices are only online now and then: a handheld with its FTP server switched on, a laptop, a NAS that sleeps.
