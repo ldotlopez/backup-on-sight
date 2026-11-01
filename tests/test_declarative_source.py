@@ -196,7 +196,105 @@ def test_rclone_string_source_is_untouched_and_still_needs_a_probe(tmp_path):
         load_job(tmp_path, '{source: ":ftp,host=h:/", every: 1h}')
 
 
+def device_tree(root) -> None:
+    for path in ["PSP/SYSTEM/a.bin", "PSP/keep.bin", "ISO/sub/y.txt", "ISOfile", "other/ISO/z.txt", "other/PSP/SYSTEM/b.bin", "Game [USA] {1}.iso.bak"]:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("x")
+
+
+def sync_tree(tool: str, root, mirror, exclude: list[str]) -> list[str]:
+    """Run the real tool over a local tree, standing in for a device, and list what reached the mirror."""
+    source = {"type": "ftp", "host": "file:///", "path": str(root), "exclude": exclude}
+    resolved = bos.source_excludes("t", source)
+    command, script = bos.sync_plan(source if tool == "lftp" else str(root), mirror, False, resolved)
+    result = subprocess.run(command, input=script, capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
+    return sorted(str(path.relative_to(mirror)) for path in mirror.rglob("*") if path.is_file())
+
+
+both_tools = pytest.mark.parametrize("tool", [pytest.param("lftp", marks=needs_lftp), pytest.param("rclone", marks=needs_rclone)])
+
+
+@both_tools
+def test_absolute_exclude_is_one_exact_file_or_folder(tmp_path, tool):
+    root = tmp_path / "device"
+    device_tree(root)
+
+    copied = sync_tree(tool, root, tmp_path / "mirror", [f"{root}/ISO", f"{root}/PSP/SYSTEM/", f"{root}/Game [USA] {{1}}.iso.bak"])
+
+    # the same names deeper down and the longer ISOfile must survive
+    assert copied == ["ISOfile", "PSP/keep.bin", "other/ISO/z.txt", "other/PSP/SYSTEM/b.bin"]
+
+
+@both_tools
+def test_glob_exclude_goes_to_the_tool(tmp_path, tool):
+    root = tmp_path / "device"
+    device_tree(root)
+
+    copied = sync_tree(tool, root, tmp_path / "mirror", ["*.bin"])
+
+    assert "PSP/keep.bin" not in copied
+    assert "other/PSP/SYSTEM/b.bin" not in copied
+    assert "ISOfile" in copied
+
+
+@both_tools
+def test_excluding_removes_what_the_mirror_already_holds(tmp_path, tool):
+    root, mirror = tmp_path / "device", tmp_path / "mirror"
+    device_tree(root)
+
+    assert "ISO/sub/y.txt" in sync_tree(tool, root, mirror, [])
+    assert "ISO/sub/y.txt" not in sync_tree(tool, root, mirror, [f"{root}/ISO"])
+
+
+@needs_lftp
+def test_excluded_unreadable_file_no_longer_fails_the_sync(tmp_path):
+    server = FakeFtp({"save.bin": b"hello", "broken.bin": None})
+    source = {"host": "127.0.0.1", "port": server.port}
+
+    command, script = bos.sync_plan(source, tmp_path / "mirror", False, ["/broken.bin"])
+    result = subprocess.run(command, input=script, capture_output=True, text=True, timeout=30, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert not any(sent.startswith("RETR") and "broken" in sent for sent in server.commands)
+
+
+@needs_lftp
+@pytest.mark.skipif(not shutil.which("restic"), reason="needs restic")
+def test_run_job_applies_excludes_from_the_config(tmp_path):
+    server = FakeFtp({"save.bin": b"hello", "broken.bin": None})
+    path = tmp_path / "config.yaml"
+    path.write_text(f"""
+state_dir: {tmp_path}/state
+restic: {{repository: {tmp_path}/repo, password: p}}
+jobs: {{t: {{source: {{type: ftp, host: 127.0.0.1, port: {server.port}, exclude: [/broken.bin]}}, every: 1h}}}}
+""")
+
+    assert bos.run_job(bos.load_config(path), "t")
+    assert [item.name for item in (tmp_path / "state/t/mirror").iterdir()] == ["save.bin"]
+
+
+def test_absolute_excludes_resolve_against_the_source_path(tmp_path):
+    job = load_job(tmp_path, "{source: {type: ftp, host: h, path: '/ms0:/', exclude: ['/ms0:/ISO/', '*.iso']}, every: 1h}")
+    assert job["exclude"] == ["/ISO", "*.iso"]
+    job = load_job(tmp_path, "{source: {type: sftp, host: h, path: /srv, exclude: [/srv/cache]}, every: 1h}")
+    assert job["exclude"] == ["/cache"]
+    assert "exclude" not in job["source"]
+
+
+def test_no_excludes_leaves_the_commands_alone(tmp_path):
+    assert "--delete-excluded" not in bos.sync_plan({"host": "h"}, tmp_path, False, [])[1]
+    assert "--delete-excluded" not in bos.sync_plan(":ftp,host=h:/", tmp_path, False, [])[0]
+
+
 @pytest.mark.parametrize(("source", "message"), [
+    ("{type: ftp, host: h, exclude: nope}", "must be a list"),
+    ("{type: ftp, host: h, exclude: ['']}", "must be a list"),
+    ('{type: ftp, host: h, exclude: ["/a\\nb"]}', "must be a list"),
+    ("{type: ftp, host: h, path: '/ms0:/', exclude: [/ISO]}", "must be inside the source path"),
+    ("{type: ftp, host: h, path: '/ms0:/', exclude: ['/ms0:/']}", "must be inside the source path"),
+    ("{type: sftp, host: h, path: /srv, exclude: [/srv2/x]}", "must be inside the source path"),
+    ("{type: ftp, host: h, exclude: ['/a/*.iso']}", "absolute paths are literal"),
     ("{host: h}", "source needs a type"),
     ("{type: 'a,b', host: h}", "source needs a type"),
     ("{type: sftp, host: h, passwd: x}", "unknown source settings: passwd"),
@@ -212,3 +310,8 @@ def test_rclone_string_source_is_untouched_and_still_needs_a_probe(tmp_path):
 def test_rejects_bad_sources(tmp_path, source, message):
     with pytest.raises(ValueError, match=message):
         load_job(tmp_path, f"{{source: {source}, every: 1h}}")
+
+
+def test_exclude_outside_the_source_block_is_rejected(tmp_path):
+    with pytest.raises(ValueError, match="exclude is a source setting"):
+        load_job(tmp_path, "{source: {type: ftp, host: h}, exclude: ['*.iso'], every: 1h}")

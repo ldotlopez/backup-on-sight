@@ -20,6 +20,9 @@ jobs:
       # user: me                 # ftp default: anonymous
       # password: "${PSP_FTP_PASS}"  # the plain password
       # options: {"net:connection-limit": 2}  # optional lftp settings (rclone backend options for other types)
+      # exclude:                 # optional: absolute paths on the device, or globs; anything else is undefined
+      #   - /ms0:/ISO            # this file or folder, with everything inside it
+      #   - "*.tmp"              # matched by the sync tool, at any depth
     probe: {interval: 10s}       # optional, replaces poll_interval for this job
     every: 24h
     tags: [console, saves]       # optional, added to the app and job name tags on each snapshot

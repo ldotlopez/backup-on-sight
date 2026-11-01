@@ -81,6 +81,15 @@ the network on its own at times, so being unreachable doesn't prove a crash.
 - `file:charset` is set to UTF-8, because the container's C locale would otherwise mangle non-ASCII filenames.
 - The script goes through stdin, so the password stays out of the process list.
 
+## Excludes
+
+`exclude` has only been tested on local files and the fake FTP server, not on a console. With lftp 4.9.2 and rclone 1.60:
+
+- lftp's `--exclude-glob "/ISO"` matches nothing, and `PSP/SYSTEM/` also matches `other/PSP/SYSTEM/`. Its globs can't
+  anchor, so absolute paths become a `--exclude` regex.
+- rclone's `--exclude /ISO` still copies a folder's contents, so absolute paths also get `/ISO/**`.
+- Neither tool removes excluded files from the mirror by default, so both get `--delete-excluded`.
+
 ## Testing on real devices
 
 - The PSP is fragile, and the user may be watching it. Run one test at a time, and wait for confirmation that it's alive

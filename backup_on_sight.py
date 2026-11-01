@@ -87,8 +87,53 @@ def check_source(name: str, source: dict) -> None:
     if not (isinstance(backend, str) and re.fullmatch(r"[a-z0-9]+", backend)):
         raise ValueError(f"job {name}: source needs a type, like ftp or sftp")
     # a typo like "passwd" would otherwise silently log in with the defaults
-    if unknown := source.keys() - {"type", "host", "port", "path", "user", "password", "options"}:
+    if unknown := source.keys() - {"type", "host", "port", "path", "user", "password", "options", "exclude"}:
         raise ValueError(f"job {name}: unknown source settings: {', '.join(sorted(unknown))}")
+
+
+def source_excludes(name: str, source: dict) -> list[str]:
+    """The source's excludes as the sync tools need them: an absolute path becomes "/" plus its path inside the source; globs stay as written."""
+    excludes = source.get("exclude") or []
+    if not (isinstance(excludes, list) and all(isinstance(item, str) and item and not re.search(r"[\r\n]", item) for item in excludes)):
+        raise ValueError(f"job {name}: source exclude must be a list of globs or absolute paths, without line breaks")
+    root = (source.get("path") or "/").rstrip("/") + "/"
+    resolved = []
+    for item in excludes:
+        if not item.startswith("/"):
+            resolved.append(item)
+            continue
+        # literal, so "[USA]" in a filename works; a wildcard here would silently match nothing
+        if "*" in item or "?" in item:
+            raise ValueError(f"job {name}: exclude {item} mixes an absolute path with a glob, absolute paths are literal")
+        # the tools can't anchor outside the source, so this could never match
+        inside = item.removeprefix(root).rstrip("/")
+        if not item.startswith(root) or not inside:
+            raise ValueError(f"job {name}: exclude {item} must be inside the source path {root}")
+        resolved.append(f"/{inside}")
+    return resolved
+
+
+def rclone_excludes(excludes: list[str]) -> list[str]:
+    """rclone flags for resolved excludes. Without /** a folder's contents would still be copied."""
+    flags = ["--delete-excluded"] if excludes else []  # otherwise files already in the mirror stay in every snapshot
+    for item in excludes:
+        if item.startswith("/"):
+            literal = re.sub(r"([\\*?\[\]{}])", r"\\\1", item)
+            flags += [f"--exclude={literal}", f"--exclude={literal}/**"]
+        else:
+            flags.append(f"--exclude={item}")
+    return flags
+
+
+def lftp_excludes(excludes: list[str]) -> str:
+    """lftp mirror flags for resolved excludes. Its globs can't anchor (a leading / matches nothing), so absolute paths use a regex."""
+    flags = ["--delete-excluded"] if excludes else []  # otherwise files already in the mirror stay in every snapshot
+    for item in excludes:
+        if item.startswith("/"):
+            flags.append(f"--exclude {lftp_quote(f'^{re.escape(item[1:])}(/|$)')}")
+        else:
+            flags.append(f"--exclude-glob {lftp_quote(item)}")
+    return "".join(f"{flag} " for flag in flags)
 
 
 def rclone_source(name: str, source: dict) -> str:
@@ -122,7 +167,7 @@ def lftp_quote(value: object) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def lftp_script(source: dict, mirror: Path, verbose: bool = False) -> str:
+def lftp_script(source: dict, mirror: Path, verbose: bool = False, exclude: list[str] | None = None) -> str:
     """The lftp commands that make the mirror match an FTP source."""
     settings = FTP_DEFAULT_OPTIONS | (source.get("options") or {})
     port, user = source.get("port", DEFAULT_PORTS["ftp"]), source.get("user", "anonymous")
@@ -131,17 +176,17 @@ def lftp_script(source: dict, mirror: Path, verbose: bool = False) -> str:
         *(f"set {key} {lftp_quote(value)}" for key, value in settings.items()),
         f"open -p {lftp_quote(port)} {lftp_quote(source['host'])}",
         f"user {lftp_quote(user)} {lftp_quote(password)}",
-        f"mirror --delete --no-perms {'-v ' if verbose else ''}{lftp_quote(source.get('path') or '/')} {lftp_quote(mirror)}",
+        f"mirror --delete --no-perms {lftp_excludes(exclude or [])}{'-v ' if verbose else ''}{lftp_quote(source.get('path') or '/')} {lftp_quote(mirror)}",
         "",
     ])
 
 
-def sync_plan(source: str | dict, mirror: Path, verbose: bool) -> tuple[list[str], str | None]:
+def sync_plan(source: str | dict, mirror: Path, verbose: bool, exclude: list[str] | None = None) -> tuple[list[str], str | None]:
     """The command that syncs a source into the mirror and what to feed it: FTP goes through lftp, the rest through rclone."""
     if isinstance(source, dict):
         # through stdin, so the password stays out of the process list
-        return ["lftp"], lftp_script(source, mirror, verbose)
-    command = ["rclone", "sync", source, str(mirror), "--contimeout", "15s", "--timeout", "60s", "--retries", "1"]
+        return ["lftp"], lftp_script(source, mirror, verbose, exclude)
+    command = ["rclone", "sync", source, str(mirror), "--contimeout", "15s", "--timeout", "60s", "--retries", "1", *rclone_excludes(exclude or [])]
     return [*command, "-v"] if verbose else command, None
 
 
@@ -167,9 +212,13 @@ def load_config(path: Path) -> dict:
         # null is allowed: it opts the job out of the global webhook
         if job.get("webhook") is not None and not valid_webhook(job["webhook"]):
             raise ValueError(f"job {name}: webhook must be an http(s) URL")
+        # the resolved list lives here, so one in the config would be silently replaced or used unchecked
+        if "exclude" in job:
+            raise ValueError(f"job {name}: exclude is a source setting, put it under source")
         if isinstance(job.get("source"), dict):
             declared = job["source"]
             check_source(name, declared)
+            job["exclude"] = source_excludes(name, declared)
             if declared["type"] == "ftp":
                 check_ftp_source(name, declared)  # stays as settings: lftp has no connection strings
             else:
@@ -317,7 +366,7 @@ def back_up(cfg: dict, name: str, d: Path) -> str | None:
     # sync deletes extraneous files only after a complete pass; an interrupted run leaves the mirror
     # half-updated but never snapshotted, and the next run resumes from it
     source = job["source"]
-    command, script = sync_plan(source, mirror, log.isEnabledFor(logging.DEBUG))
+    command, script = sync_plan(source, mirror, log.isEnabledFor(logging.DEBUG), job.get("exclude"))
     # rclone prints the connection string in its errors, so hide it; errors="replace" because device filenames may not be UTF-8
     # shortcut: its errors appear when the sync ends, not live; stream them line by line if that hurts on long syncs
     started = time.monotonic()

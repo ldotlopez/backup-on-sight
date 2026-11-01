@@ -94,6 +94,7 @@ jobs:
 | `path` | No | The folder to back up. Defaults to `/` |
 | `user`, `password` | Depends on the backend | Write the plain password. `ftp` defaults to `anonymous` |
 | `options` | No | For `ftp`, [lftp settings](https://lftp.yar.ru/lftp-man.html) like `{"net:connection-limit": 2}`. For others, rclone backend options like `{key_file: /keys/nas}` |
+| `exclude` | No | A list of paths to leave out, see [Excluding paths](#excluding-paths) |
 
 `type: ftp` is set up for the fragile FTP servers on consoles: one connection, no TLS, no `FEAT`, and listings sent as
 `LIST .`. Change that through `options` for a server that can take more, or that needs TLS.
@@ -106,6 +107,35 @@ fails on the Switch's servers.
 Strings accept `${VAR}`, resolved from the environment or from a `.env` next to the config file (the environment
 wins). A missing variable stops startup. Write a literal `$` as `$$`, and quote values inside `{...}`, such as URLs
 containing `?`.
+
+## Excluding paths
+
+```yaml
+source:
+  type: ftp
+  host: 192.168.1.50
+  path: /ms0:/
+  exclude:
+    - /ms0:/ISO              # an absolute path: this one file or folder, with everything inside it
+    - /ms0:/Game [USA].iso   # brackets in an absolute path are just part of the name
+    - "*.tmp"                # a glob: matched by the sync tool, at any depth
+```
+
+Every entry must be one of these two:
+
+- **An absolute path** starts with `/` and is the full path on the device, not a path relative to `path`. It has to be
+  inside `path`, and one that isn't stops startup, as does one containing `*` or `?`.
+- **A glob** is passed to the sync tool as written, so it follows the rules of
+  [lftp](https://lftp.yar.ru/lftp-man.html) (`--exclude-glob`) or [rclone](https://rclone.org/filtering/) (`--exclude`),
+  which differ. For example, lftp only matches a folder with a trailing `/`. Quote globs in YAML, since `*` means
+  something there.
+
+Anything else, like a relative path such as `PSP/SYSTEM`, is **undefined**: it may match something or nothing, and may
+change between versions.
+
+Excluded files are also removed from the mirror, so they stop appearing in new snapshots. Older snapshots keep them.
+
+`exclude` is only available in the source settings, not for a source string.
 
 ## Repositories: shared or isolated
 
@@ -169,7 +199,7 @@ restic restore latest --tag psp --target ./restored
 - **A source with no files fails the run,** because that more likely means a broken device or path. By then a
   previously full mirror may already be emptied, so it's copied again once the files return. A source that only
   loses *most* of its files is still snapshotted as a success.
-- **One unreadable file blocks the job.** Any sync error means no snapshot, and there's no way to exclude files yet.
+- **One unreadable file blocks the job.** Any sync error means no snapshot, unless you [exclude](#excluding-paths) the file.
 - **Retention isn't handled.** `restic forget` and `prune` are never run, so snapshots accumulate until you run them.
 - **Sync errors are delayed.** They appear when the sync ends, not as it runs.
 - **Failing backends are slow to report.** restic retries for several minutes before giving up.
