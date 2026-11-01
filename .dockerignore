@@ -1,5 +1,6 @@
 .venv
 .git
 data
+state
 config
 tests

@@ -39,7 +39,7 @@ continues from it.
 cp config/config.example.yaml config/config.yaml
 cp config/.env.example config/.env      # edit both; rclone passwords come from `rclone obscure <password>`
 
-uv run bos -c config/config.yaml daemon
+uv run bos daemon
 ```
 
 A `Dockerfile` and `docker-compose.yml` are included (`docker compose up -d --build`). The image has been run with
@@ -47,14 +47,17 @@ podman, but `docker compose` itself hasn't been tested, so expect to check it.
 
 The container runs backups as the numeric user and group in `EUID` and `EGID`, which need no account in the image.
 `docker-compose.yml` sets both to 1000, and without them the container runs as root. On each start it gives that user
-ownership of anything in `/state` and `/restic` that it doesn't already own, so the first start can be slow with large
-mirrors. It doesn't change `/config`, so make sure that user can read it.
+ownership of anything in its state directory and `/restic` that it doesn't already own, so the first start can be slow
+with large mirrors. It doesn't change the config file, so make sure that user can read it.
+
+In the container, `BACKUP_ON_SIGHT_STATE_DIR` defaults to `/state` and `BACKUP_ON_SIGHT_CONFIG_FILE` to `/config.yaml`.
+A `state_dir` in the config still wins, but only the variable's path gets its ownership fixed, so keep the two the same.
 
 - Set `EUID` and `EGID` in `docker-compose.yml`, not `config/.env`: bash reports an error when `. config/.env` assigns
   `EUID`, which is read-only there.
 - Run on-demand backups through the entrypoint, so they use the same user:
-  `docker exec backup-on-sight docker-entrypoint.sh bos run psp`. A plain `docker exec` runs as root and can leave
-  root-owned files that block the daemon until the next start.
+  `docker exec backup-on-sight docker-entrypoint.sh bos run psp`. A plain `docker exec` skips the entrypoint, so it runs
+  as root without the container defaults.
 
 ## Configuration
 
@@ -62,7 +65,7 @@ mirrors. It doesn't change `/config`, so make sure that user can read it.
 restic:                            # shared repository, for jobs without their own
   repository: "${RESTIC_REPOSITORY}"
   password: "${RESTIC_PASSWORD}"
-state_dir: "${BACKUP_ON_SIGHT_STATE_DIR}"   # one mirror, lock and last_ok per job
+# state_dir: ./state               # optional, the root of the data: <state_dir>/<job>/ holds its mirror, lock and last_ok
 poll_interval: 30s                 # optional, default 30s
 webhook: https://hooks.lan/backups # optional
 
@@ -112,7 +115,10 @@ bos [-c CONFIG] [-v] run --force JOB     # back up now regardless
 `run` ignores the probe and won't start if that job is already running. It exits with status 1 if the backup fails
 or the job is already running, and 0 otherwise, **including when it skips a recent backup**.
 
-The config defaults to `config.yaml`, or `$BACKUP_ON_SIGHT_CONFIG` if set. `-v` adds debug detail: the next due
+The config comes from `-c`, then `$BACKUP_ON_SIGHT_CONFIG_FILE`, then `./config/config.yaml`. The state directory comes
+from `state_dir` in the config, then `$BACKUP_ON_SIGHT_STATE_DIR`, then `./state`. Relative paths follow the directory
+you start `bos` from, and the log shows the full paths at startup. Starting from another directory with a relative state
+directory means a new mirror and a separate lock, so a second copy could run at once. Use an absolute path for services. `-v` adds debug detail: the next due
 time, exit codes and timings, webhook payloads and responses, and rclone's `-v` output.
 
 ## Webhooks

@@ -296,6 +296,56 @@ jobs:
     assert snapshot_count() == 2
 
 
+@pytest.mark.parametrize(("top", "expected"), [
+    ("", "/from-env"),
+    ("state_dir: /from-config", "/from-config"),
+    ("state_dir: null", "/from-env"),
+])
+def test_state_dir_prefers_config_over_env(tmp_path, monkeypatch, top, expected):
+    monkeypatch.setenv("BACKUP_ON_SIGHT_STATE_DIR", "/from-env")
+    path = tmp_path / "config.yaml"
+    path.write_text(interval_config(top=top))
+    assert bos.load_config(path)["state_dir"] == expected
+
+
+def test_relative_state_dir_is_pinned_to_the_starting_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("BACKUP_ON_SIGHT_STATE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "elsewhere").mkdir()
+    path = tmp_path / "config.yaml"
+
+    path.write_text(interval_config())
+    default = bos.load_config(path)
+    assert default["state_dir"] == str(tmp_path.resolve() / "state")
+
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    assert bos.job_dir(default, "t") == tmp_path.resolve() / "state" / "t"
+
+    monkeypatch.setenv("BACKUP_ON_SIGHT_STATE_DIR", "../from-env")
+    assert bos.load_config(path)["state_dir"] == str(tmp_path.resolve() / "from-env")
+
+
+def test_config_defaults_to_config_dir_of_working_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("BACKUP_ON_SIGHT_CONFIG_FILE", raising=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["bos", "run", "t"])
+    with pytest.raises(FileNotFoundError) as error:
+        bos.main()
+    assert error.value.filename == "config/config.yaml"
+
+
+@pytest.mark.parametrize(("flag", "expected"), [
+    ([], "/nonexistent/from-env.yaml"),
+    (["-c", "/nonexistent/from-flag.yaml"], "/nonexistent/from-flag.yaml"),
+])
+def test_config_flag_prefers_over_env(monkeypatch, flag, expected):
+    monkeypatch.setenv("BACKUP_ON_SIGHT_CONFIG_FILE", "/nonexistent/from-env.yaml")
+    monkeypatch.setattr("sys.argv", ["bos", *flag, "run", "t"])
+    with pytest.raises(FileNotFoundError) as error:
+        bos.main()
+    assert error.value.filename == expected
+
+
 def interval_config(job_interval: str = "", top: str = "") -> str:
     return (f"{top}\nrestic: {{repository: r, password: p}}\n"
             f"jobs: {{t: {{probe: {{host: x, port: 1{job_interval}}}, source: s, every: 1h}}}}")

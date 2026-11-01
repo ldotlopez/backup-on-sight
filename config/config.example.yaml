@@ -4,7 +4,8 @@ restic:
   # shared repo for jobs without their own restic block; each job's name is added as a tag to tell them apart
   repository: /restic            # any restic repo URL works (sftp:, s3:, rest:...); backend creds go in .env
   password: "${RESTIC_PASSWORD}"
-state_dir: "${BACKUP_ON_SIGHT_STATE_DIR}"    # one mirror + lock + last_ok per job
+# Root of the data, holding one directory per job (mirror + lock + last_ok). Setting it here beats BACKUP_ON_SIGHT_STATE_DIR.
+# state_dir: ./state             # default: BACKUP_ON_SIGHT_STATE_DIR, else ./state (/state in the container)
 poll_interval: 30s               # how often each job checks if a backup is due and probes its host
 # webhook: https://hooks.lan/backups # optional, gets a JSON POST when a backup starts and ends
 

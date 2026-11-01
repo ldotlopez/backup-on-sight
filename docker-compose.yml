@@ -6,11 +6,11 @@ services:
     network_mode: host           # probes must reach LAN hosts directly
     env_file: ./config/.env
     environment:
-      BACKUP_ON_SIGHT_STATE_DIR: /state
+      BACKUP_ON_SIGHT_STATE_DIR: /state   # replaces the path used outside docker in config/.env
       EUID: 1000                 # owner of /state and /restic; set here, not in config/.env
       EGID: 1000
     volumes:
-      - ./config:/config:ro
+      - ./config/config.yaml:/config.yaml:ro
       - ./data/state:/state
       - ./data/restic:/restic
 # on demand, as EUID:EGID: docker exec backup-on-sight docker-entrypoint.sh bos run psp

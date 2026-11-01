@@ -65,6 +65,9 @@ def load_config(path: Path) -> dict:
     # .env never overrides the real environment (docker env_file / environment win)
     load_dotenv(path.parent / ".env")
     cfg = expand(yaml.safe_load(path.read_text()))
+    # absolute from here on: a relative path follows the working directory, and a new one means a fresh mirror and lock
+    cfg["state_dir"] = str(Path(cfg.get("state_dir") or os.environ.get("BACKUP_ON_SIGHT_STATE_DIR") or "state").resolve())
+    log.info("config %s, state directory %s", path.resolve(), cfg["state_dir"])
     if cfg.get("webhook") is not None and not valid_webhook(cfg["webhook"]):
         raise ValueError("webhook must be an http(s) URL")
     for name, job in cfg["jobs"].items():
@@ -295,7 +298,7 @@ def watch(cfg: dict, name: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bos")
-    parser.add_argument("-c", "--config", type=Path, default=Path(os.environ.get("BACKUP_ON_SIGHT_CONFIG", "config.yaml")))
+    parser.add_argument("-c", "--config", type=Path, default=Path(os.environ.get("BACKUP_ON_SIGHT_CONFIG_FILE", "config/config.yaml")))
     parser.add_argument("-v", "--verbose", action="store_true", help="log debug details, including rclone's")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daemon", help="watch all jobs")
