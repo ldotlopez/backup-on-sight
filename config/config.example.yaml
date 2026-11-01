@@ -10,15 +10,23 @@ poll_interval: 30s               # how often each job checks if a backup is due 
 # webhook: https://hooks.lan/backups # optional, gets a JSON POST when a backup starts and ends
 
 jobs:
-  # PSP with the FTP server enabled. rclone wants the password obscured: `rclone obscure <pass>`
+  # PSP with the FTP server enabled. The probe comes from the source's host and port.
   psp:
-    probe: {host: 192.168.1.50, port: 21, interval: 10s}   # interval is optional, replaces poll_interval for this job
-    source: ":ftp,host=192.168.1.50,user=anonymous,pass=${PSP_FTP_PASS}:/PSP/SAVEDATA"   # adjust to the path your FTP homebrew exposes
+    source:
+      type: ftp                  # any rclone backend
+      host: 192.168.1.50
+      port: 21                   # optional for ftp and sftp
+      path: /ms0:/               # optional, the PSP's root share; default is the folder the server logs you into
+      # user: me                 # ftp default: anonymous
+      # password: "${PSP_FTP_PASS}"  # the plain password, it's obscured for you
+      # options: {concurrency: 2}    # optional rclone backend options
+    probe: {interval: 10s}       # optional, replaces poll_interval for this job
     every: 24h
     tags: [console, saves]       # optional, added to the app and job name tags on each snapshot
     # webhook: https://hooks.lan/psp  # optional, replaces the global webhook for this job; null disables it
 
-  # Always-on host over SFTP, backed up weekly, isolated in its own repository
+  # A source can also be a raw rclone source string, which needs its own probe and an obscured password
+  # (`rclone obscure <pass>`). This one is an always-on host, backed up weekly, in its own repository.
   nas-photos:
     restic:
       repository: "${NAS_RESTIC_REPOSITORY}"

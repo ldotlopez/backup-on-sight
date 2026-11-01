@@ -27,6 +27,9 @@ UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 RETRY_AFTER_FAILURE = 300  # shortcut: fixed backoff after a failed run, make it per-job if it ever matters
 INIT_LOCK = threading.Lock()
 WEBHOOK_TIMEOUT = 10
+DEFAULT_PORTS = {"ftp": 21, "sftp": 22}  # lets these types skip the probe; any other type needs a port or a probe
+# console FTP servers are fragile: the PSP's works with these and went down when probed without them, cause unproven
+FTP_DEFAULT_OPTIONS = {"concurrency": 1, "disable_epsv": True, "disable_mlsd": True}
 
 
 def expand(value):
@@ -61,6 +64,51 @@ def valid_webhook(url: object) -> bool:
     return isinstance(url, str) and re.fullmatch(r"https?://[\x21-\x7e]+", url) is not None
 
 
+def rclone_obscure(password: str) -> str:
+    # through stdin, so the plain password stays out of the process list
+    return subprocess.run(["rclone", "obscure", "-"], input=password, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def rclone_quote(value: object) -> str:
+    text = str(value).lower() if isinstance(value, bool) else str(value)  # rclone wants true, YAML's str gives True
+    return '"' + text.replace('"', '""') + '"'
+
+
+def rclone_source(name: str, source: dict) -> str:
+    """Turn a declarative source into an rclone connection string."""
+    backend = source.get("type")
+    if not (isinstance(backend, str) and re.fullmatch(r"[a-z0-9]+", backend)):
+        raise ValueError(f"job {name}: source needs a type, an rclone backend like ftp or sftp")
+    # a typo like "passwd" would otherwise silently log in with the defaults
+    if unknown := source.keys() - {"type", "host", "port", "path", "user", "password", "options"}:
+        raise ValueError(f"job {name}: unknown source settings: {', '.join(sorted(unknown))}")
+    options = source.get("options") or {}
+    if not (isinstance(options, dict) and all(re.fullmatch(r"[a-z0-9_]+", str(key)) for key in options)):
+        raise ValueError(f"job {name}: source options must map rclone option names to values")
+
+    params = {key: source[key] for key in ("host", "port", "user") if source.get(key) is not None}
+    password = source.get("password")
+    if backend == "ftp":  # rclone's FTP refuses an empty password, even to log in as anonymous
+        params.setdefault("user", "anonymous")
+        password = "anonymous" if password is None else password
+        params |= FTP_DEFAULT_OPTIONS
+    if password is not None:
+        params["pass"] = rclone_obscure(password)
+    params |= options
+    joined = "".join(f",{key}={rclone_quote(value)}" for key, value in params.items())
+    # no default path: some servers only answer for their login folder, not for an explicit /
+    return f":{backend}{joined}:{source.get('path') or ''}"
+
+
+def declared_probe(name: str, source: dict, probe: dict | None) -> dict:
+    """The job's probe, defaulting to the declarative source's own host and port."""
+    declared = {"host": source.get("host"), "port": source.get("port", DEFAULT_PORTS.get(source.get("type")))}
+    merged = {key: value for key, value in declared.items() if value is not None} | (probe or {})
+    if not {"host", "port"} <= merged.keys():
+        raise ValueError(f"job {name}: source can't provide a probe, set probe host and port")
+    return merged
+
+
 def load_config(path: Path) -> dict:
     # .env never overrides the real environment (docker env_file / environment win)
     load_dotenv(path.parent / ".env")
@@ -74,6 +122,10 @@ def load_config(path: Path) -> dict:
         # null is allowed: it opts the job out of the global webhook
         if job.get("webhook") is not None and not valid_webhook(job["webhook"]):
             raise ValueError(f"job {name}: webhook must be an http(s) URL")
+        if isinstance(job.get("source"), dict):
+            declared = job["source"]
+            job["source"] = rclone_source(name, declared)
+            job["probe"] = declared_probe(name, declared, job.get("probe"))
         if missing := {"probe", "source", "every"} - job.keys():
             raise ValueError(f"job {name}: missing {', '.join(sorted(missing))}")
         # the job name is every snapshot's unique tag: it must not split, match all snapshots, or be forged by another job

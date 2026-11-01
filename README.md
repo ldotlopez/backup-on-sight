@@ -37,7 +37,7 @@ continues from it.
 
 ```sh
 cp config/config.example.yaml config/config.yaml
-cp config/.env.example config/.env      # edit both; rclone passwords come from `rclone obscure <password>`
+cp config/.env.example config/.env      # edit both
 
 uv run bos daemon
 ```
@@ -71,21 +71,35 @@ webhook: https://hooks.lan/backups # optional
 
 jobs:
   psp:
-    probe: {host: 192.168.1.50, port: 21, interval: 10s}
-    source: ":ftp,host=192.168.1.50,user=anonymous,pass=${PSP_FTP_PASS}:/PSP/SAVEDATA"
+    source: {type: ftp, host: 192.168.1.50, path: "/ms0:/"}
+    probe: {interval: 10s}
     every: 24h
     tags: [console, saves]
 ```
 
 | Job setting | Required | Meaning |
 |---|---|---|
-| `probe.host`, `probe.port` | Yes | The TCP address that shows the device is online |
+| `source` | Yes | Where to copy from: the settings below, or a string holding any rclone source, usually a [connection string](https://rclone.org/docs/#connection-strings) |
+| `probe.host`, `probe.port` | Unless the source provides them | The TCP address that shows the device is online. Defaults to the source's host and port. A source string always needs both |
 | `probe.interval` | No | Replaces `poll_interval` for this job |
-| `source` | Yes | Any rclone source, usually a [connection string](https://rclone.org/docs/#connection-strings) |
 | `every` | Yes | Minimum time between backups: a number of seconds, or a value like `90s`, `30m`, `24h`, `7d` |
 | `tags` | No | Extra restic tags |
 | `restic` | No | The job's own `repository` and `password`, replacing the shared repository |
 | `webhook` | No | Replaces the global webhook for this job; `null` turns it off |
+
+| Source setting | Required | Meaning |
+|---|---|---|
+| `type` | Yes | An [rclone backend](https://rclone.org/overview/), like `ftp` or `sftp` |
+| `host`, `port` | Depends on the backend | The device's address. `ftp` defaults to port 21 and `sftp` to 22 |
+| `path` | No | The folder to back up. By default, the folder the server logs you into |
+| `user`, `password` | Depends on the backend | Write the plain password, it's obscured for you. `ftp` defaults to `anonymous` |
+| `options` | No | Any other rclone backend options, like `{key_file: /keys/nas}` |
+
+`type: ftp` defaults to `concurrency: 1`, `disable_epsv: true` and `disable_mlsd: true`, because the FTP servers on
+consoles are fragile. Raise them through `options` for a server that can take it.
+
+Paths depend on the device. A PSP needs its root share, `/ms0:/`. Leaving out `path` isn't the same as `path: /`, as
+some servers only answer for one of them.
 
 Strings accept `${VAR}`, resolved from the environment or from a `.env` next to the config file (the environment
 wins). A missing variable stops startup. Write a literal `$` as `$$`, and quote values inside `{...}`, such as URLs
@@ -100,9 +114,8 @@ A tag is only a label, though. Anyone with a shared repository's password can re
 Give a job its own `restic` block when it needs real separation. You can mix both, and the top-level block is optional
 if every job has its own.
 
-Each snapshot is tagged `backup-on-sight`, the job name and any custom `tags`. Restic's host is the `host=` value
-from the rclone source, or the job name if there isn't one, so if a device's address changes, its snapshots
-appear under a new host.
+Each snapshot is tagged `backup-on-sight`, the job name and any custom `tags`. Restic's host is the source's host, or
+the job name if it doesn't have one, so if a device's address changes, its snapshots appear under a new host.
 
 ## Commands
 
@@ -155,6 +168,8 @@ restic restore latest --tag psp --target ./restored
   previously full mirror may already be emptied, so it's copied again once the files return. A source that only
   loses *most* of its files is still snapshotted as a success.
 - **One unreadable file blocks the job.** Any rclone error means no snapshot, and there's no way to exclude files yet.
+- **rclone can't back up some FTP servers.** The Switch's answers a listing with a path as an empty folder, and only
+  lists a folder after changing into it, which rclone doesn't do. The sync fails with `dirExists: object not found`.
 - **Retention isn't handled.** `restic forget` and `prune` are never run, so snapshots accumulate until you run them.
 - **rclone's output is delayed.** Its messages appear when the sync ends, not as it runs.
 - **Failing backends are slow to report.** restic retries for several minutes before giving up.
